@@ -21,14 +21,36 @@
 #include <time.h>
 #include <unistd.h>
 #include <linux/perf_event.h>
+#include <signal.h>
+#include <execinfo.h>
 
-static long
-sys_perf_event_open(struct perf_event_attr *hw_event,
-                    pid_t pid, int cpu, int group_fd,
-                    unsigned long flags)
+static int fd;
+static int count = 0;
+static int disable = 0;
+
+#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+
+static long sys_perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
+		int cpu, int group_fd, unsigned long flags)
 {
-  return syscall(__NR_perf_event_open, hw_event, pid, cpu,
-                 group_fd, flags);
+	return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd,
+			flags);
+}
+
+static void signal_handler(int signum, siginfo_t *info, void *arg)
+{
+	if (disable)
+		ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+	if (!count) {
+		static int depth = 20;
+		void *buffer[20];
+		backtrace(buffer, depth);
+		backtrace_symbols_fd(buffer, depth, 1);
+	}
+	++count;
+	__sync_synchronize();
+	if (disable)
+		ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 }
 
 static void
@@ -51,16 +73,51 @@ int main(int argc, char **argv)
 {
 	uint64_t val;
 	int ret;
+	int flags;
 	int repeat = 100;
+	struct sigaction sigact;
 	struct perf_event_attr attr = {
 		.type = PERF_TYPE_SOFTWARE,
-		.config = PERF_COUNT_SW_PAGE_FAULTS,
 		.size = sizeof(attr),
+		.config = PERF_COUNT_SW_PAGE_FAULTS,
+		.sample_period = 1,
 	};
-	int fd = sys_perf_event_open(&attr, getpid(), -1, -1, 0);
+
+	if (argc > 1) {
+		ACCESS_ONCE(disable) = atoi(argv[1]);
+	}
+
+	fd = sys_perf_event_open(&attr, getpid(), -1, -1, 0);
+	assert(fd > 0);
+
+	// install signal handler
+	sigact.sa_sigaction = signal_handler;
+	sigact.sa_flags = SA_SIGINFO;
+	ret = sigaction(SIGIO, &sigact, NULL);
+	assert(ret == 0);
+
+	kill(getpid(), SIGIO);
+	// fasync setup
+	fcntl(fd, F_SETOWN, getpid());
+	flags = fcntl(fd, F_GETFL);
+	fcntl(fd, F_SETFL, flags | FASYNC);
+
 	do_page_faults(repeat);
+	ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+
 	ret = read(fd, &val, sizeof(val));
-	printf("ret=%d val=%" PRId64 "\n", ret, val);
-	assert(val >= repeat);
+	__sync_synchronize();
+
+	printf("ret=%d repeat=%d counter=%" PRId64 " signals=%d\n", ret, repeat, val, count);
+	/*
+	 * There should be at least repeat page faults.
+	 * The count is about 50 less than
+	 */
+	int threshold = 5;
+	int diff = disable ? 0 : 52;
+	assert((val - (repeat + diff)) < threshold);
+	assert((val - (count + diff)) < threshold);
+
+
 	return 0;
 }
