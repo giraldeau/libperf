@@ -1,5 +1,5 @@
 lib_LTLIBRARIES = libperf.la
-check_PROGRAMS = test example benchmark
+check_PROGRAMS = test example benchmark test_signal
 
 EXTRA_DIST = libperf.h perf_event.h libperf_example.c libperf_test.c libperf_benchmark.c
 
@@ -21,3 +21,6 @@ example_LDADD = libperf.la
 
 benchmark_SOURCES = libperf_benchmark.c
 benchmark_LDADD = libperf.la
+
+test_signal_SOURCES = libperf_signal.c
+test_signal_LDADD = libperf.la
