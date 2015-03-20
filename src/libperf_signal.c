@@ -96,7 +96,6 @@ int main(int argc, char **argv)
 	ret = sigaction(SIGIO, &sigact, NULL);
 	assert(ret == 0);
 
-	kill(getpid(), SIGIO);
 	// fasync setup
 	fcntl(fd, F_SETOWN, getpid());
 	flags = fcntl(fd, F_GETFL);
@@ -110,14 +109,13 @@ int main(int argc, char **argv)
 
 	printf("ret=%d repeat=%d counter=%" PRId64 " signals=%d\n", ret, repeat, val, count);
 	/*
-	 * There should be at least repeat page faults.
-	 * The count is about 50 less than
+	 * There should be at least repeat page faults. There are about 50 more
+	 * page faults then repeat if the event counter is not disabled within
+	 * the signal handler.
 	 */
 	int threshold = 5;
-	int diff = disable ? 0 : 52;
-	assert((val - (repeat + diff)) < threshold);
-	assert((val - (count + diff)) < threshold);
-
-
+	int diff = disable ? 0 : 55;
+	assert(abs(val - (repeat + diff)) < threshold);
+	assert(abs(val - (count + diff)) < threshold);
 	return 0;
 }
