@@ -22,10 +22,10 @@
 #include <unistd.h>
 #include <linux/perf_event.h>
 #include <signal.h>
-#include <execinfo.h>
+#include <pthread.h>
 
 static int fd;
-static int count = 0;
+static int __thread count = 0;
 static int disable = 0;
 
 #define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
@@ -41,13 +41,7 @@ static void signal_handler(int signum, siginfo_t *info, void *arg)
 {
 	if (disable)
 		ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
-	if (!count) {
-		static int depth = 20;
-		void *buffer[20];
-		backtrace(buffer, depth);
-		backtrace_symbols_fd(buffer, depth, 1);
-	}
-	++count;
+	count++;
 	__sync_synchronize();
 	if (disable)
 		ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
@@ -69,12 +63,15 @@ do_page_faults(int repeat)
 	}
 }
 
-int main(int argc, char **argv)
+pthread_barrier_t barrier;
+
+void *do_work(void *args)
 {
+	int repeat = *((int *) args);
 	uint64_t val;
+	int tid;
 	int ret;
 	int flags;
-	int repeat = 100;
 	struct sigaction sigact;
 	struct perf_event_attr attr = {
 		.type = PERF_TYPE_SOFTWARE,
@@ -83,11 +80,8 @@ int main(int argc, char **argv)
 		.sample_period = 1,
 	};
 
-	if (argc > 1) {
-		ACCESS_ONCE(disable) = atoi(argv[1]);
-	}
-
-	fd = sys_perf_event_open(&attr, getpid(), -1, -1, 0);
+	tid = syscall(__NR_gettid);
+	fd = sys_perf_event_open(&attr, tid, -1, -1, 0);
 	assert(fd > 0);
 
 	// install signal handler
@@ -97,17 +91,19 @@ int main(int argc, char **argv)
 	assert(ret == 0);
 
 	// fasync setup
-	fcntl(fd, F_SETOWN, getpid());
+	fcntl(fd, F_SETOWN, tid);
 	flags = fcntl(fd, F_GETFL);
 	fcntl(fd, F_SETFL, flags | FASYNC);
 
 	do_page_faults(repeat);
+	pthread_barrier_wait(&barrier);
 	ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 
 	ret = read(fd, &val, sizeof(val));
 	__sync_synchronize();
 
-	printf("ret=%d repeat=%d counter=%" PRId64 " signals=%d\n", ret, repeat, val, count);
+	printf("tid=%d ret=%d repeat=%d exp=%" PRId64 " act=%d\n",
+			tid, ret, repeat, val, count);
 	/*
 	 * There should be at least repeat page faults. There are about 50 more
 	 * page faults then repeat if the event counter is not disabled within
@@ -115,7 +111,32 @@ int main(int argc, char **argv)
 	 */
 	int threshold = 5;
 	int diff = disable ? 0 : 55;
-	assert(abs(val - (repeat + diff)) < threshold);
-	assert(abs(val - (count + diff)) < threshold);
+	//assert(abs(val - (repeat + diff)) < threshold);
+	//assert(abs(val - (count + diff)) < threshold);
+
+	return NULL;
+}
+
+int main(int argc, char **argv)
+{
+	int i;
+	int th = 4;
+	int repeat = 100;
+	pthread_t pth[th];
+
+	if (argc > 1) {
+		ACCESS_ONCE(disable) = atoi(argv[1]);
+	}
+
+	pthread_barrier_init(&barrier, NULL, th);
+
+	for (i = 0; i < th; i++) {
+		pthread_create(&pth[i], NULL, do_work, &repeat);
+	}
+
+	for (i = 0; i < th; i++) {
+		pthread_join(pth[i], NULL);
+	}
+
 	return 0;
 }

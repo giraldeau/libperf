@@ -24,3 +24,4 @@ benchmark_LDADD = libperf.la
 
 test_signal_SOURCES = libperf_signal.c
 test_signal_LDADD = libperf.la
+test_signal_CFLAGS = -pthread
