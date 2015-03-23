@@ -5,6 +5,7 @@
  *      Author: francis
  */
 
+#define _GNU_SOURCE
 #include <assert.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -45,10 +46,10 @@ static void signal_handler(int signum, siginfo_t *info, void *arg)
 		ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 	count++;
 	if (0) {
-	pthread_mutex_lock(&mutex);
-	printf("tid=%d signo=%d code=%d band=%d fd=%d\n",
-			syscall(__NR_gettid), info->si_signo, info->si_code, info->si_band, info->si_fd);
-	pthread_mutex_unlock(&mutex);
+		pthread_mutex_lock(&mutex);
+		printf("tid=%ld signo=%d code=%d band=%ld fd=%d\n",
+				syscall(__NR_gettid), info->si_signo, info->si_code, info->si_band, info->si_fd);
+		pthread_mutex_unlock(&mutex);
 	}
 	__sync_synchronize();
 	if (disable)
@@ -99,9 +100,29 @@ void *do_work(void *args)
 	assert(ret == 0);
 
 	// fasync setup
-	fcntl(fd, F_SETOWN, tid);
+	struct f_owner_ex ex = {
+		.type = F_OWNER_TID,
+		.pid = tid,
+	};
+	fcntl(fd, F_SETOWN_EX, &ex);
 	flags = fcntl(fd, F_GETFL);
-	fcntl(fd, F_SETFL, flags | FASYNC);
+	fcntl(fd, F_SETFL, flags | FASYNC | O_ASYNC);
+
+	fcntl(fd, F_GETOWN_EX, &ex);
+	switch (ex.type) {
+	case F_OWNER_TID:
+		printf("type F_OWNER_TID\n");
+		break;
+	case F_OWNER_PID:
+		printf("type F_OWNER_PID\n");
+		break;
+	case F_OWNER_PGRP:
+		printf("type F_OWNER_PGRP\n");
+		break;
+	default:
+		printf("type unkown\n");
+		break;
+	}
 
 	do_page_faults(repeat);
 	pthread_barrier_wait(&barrier);
