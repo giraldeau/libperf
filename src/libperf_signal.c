@@ -30,6 +30,8 @@ static int disable = 0;
 
 #define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
 
+pthread_mutex_t mutex;
+
 static long sys_perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
 		int cpu, int group_fd, unsigned long flags)
 {
@@ -42,6 +44,12 @@ static void signal_handler(int signum, siginfo_t *info, void *arg)
 	if (disable)
 		ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 	count++;
+	if (0) {
+	pthread_mutex_lock(&mutex);
+	printf("tid=%d signo=%d code=%d band=%d fd=%d\n",
+			syscall(__NR_gettid), info->si_signo, info->si_code, info->si_band, info->si_fd);
+	pthread_mutex_unlock(&mutex);
+	}
 	__sync_synchronize();
 	if (disable)
 		ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
