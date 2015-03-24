@@ -25,9 +25,11 @@
 #include <signal.h>
 #include <pthread.h>
 
-static int fd;
+static int __thread fd;
+static int __thread rank;
 static int __thread count = 0;
 static int disable = 0;
+static int repeat_in_handler = 1;
 
 #define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
 
@@ -38,22 +40,6 @@ static long sys_perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
 {
 	return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd,
 			flags);
-}
-
-static void signal_handler(int signum, siginfo_t *info, void *arg)
-{
-	if (disable)
-		ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
-	count++;
-	if (0) {
-		pthread_mutex_lock(&mutex);
-		printf("tid=%ld signo=%d code=%d band=%ld fd=%d\n",
-				syscall(__NR_gettid), info->si_signo, info->si_code, info->si_band, info->si_fd);
-		pthread_mutex_unlock(&mutex);
-	}
-	__sync_synchronize();
-	if (disable)
-		ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
 }
 
 static void
@@ -72,8 +58,21 @@ do_page_faults(int repeat)
 	}
 }
 
-pthread_barrier_t barrier;
+static void signal_handler(int signum, siginfo_t *info, void *arg)
+{
+	if (disable)
+		ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+	count++;
+	do_page_faults(repeat_in_handler);
+	__sync_synchronize();
+	if (disable)
+		ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+}
 
+pthread_barrier_t barrier;
+pthread_mutex_t lock;
+static int id = 0;
+static int period = 2;
 void *do_work(void *args)
 {
 	int repeat = *((int *) args);
@@ -86,8 +85,12 @@ void *do_work(void *args)
 		.type = PERF_TYPE_SOFTWARE,
 		.size = sizeof(attr),
 		.config = PERF_COUNT_SW_PAGE_FAULTS,
-		.sample_period = 1,
+		.sample_period = period,
 	};
+	pthread_mutex_lock(&lock);
+	rank = id++;
+	pthread_mutex_unlock(&lock);
+	repeat = repeat * (rank + 1);
 
 	tid = syscall(__NR_gettid);
 	fd = sys_perf_event_open(&attr, tid, -1, -1, 0);
@@ -104,11 +107,14 @@ void *do_work(void *args)
 		.type = F_OWNER_TID,
 		.pid = tid,
 	};
-	fcntl(fd, F_SETOWN_EX, &ex);
+	ret = fcntl(fd, F_SETOWN_EX, &ex);
+	assert(ret == 0);
 	flags = fcntl(fd, F_GETFL);
-	fcntl(fd, F_SETFL, flags | FASYNC | O_ASYNC);
+	ret = fcntl(fd, F_SETFL, flags | FASYNC | O_ASYNC);
+	assert(ret == 0);
 
-	fcntl(fd, F_GETOWN_EX, &ex);
+	ret = fcntl(fd, F_GETOWN_EX, &ex);
+	assert(ret == 0);
 	switch (ex.type) {
 	case F_OWNER_TID:
 		printf("type F_OWNER_TID\n");
@@ -131,18 +137,28 @@ void *do_work(void *args)
 	ret = read(fd, &val, sizeof(val));
 	__sync_synchronize();
 
-	printf("tid=%d ret=%d repeat=%d exp=%" PRId64 " act=%d\n",
+	printf("tid=%d ret=%d repeat=%d counter=%" PRId64 " signals=%d\n",
 			tid, ret, repeat, val, count);
-	/*
-	 * There should be at least repeat page faults. There are about 50 more
-	 * page faults then repeat if the event counter is not disabled within
-	 * the signal handler.
-	 */
-	int threshold = 5;
-	int diff = disable ? 0 : 55;
-	//assert(abs(val - (repeat + diff)) < threshold);
-	//assert(abs(val - (count + diff)) < threshold);
+	pthread_barrier_wait(&barrier);
 
+	/*
+	 * hum... there are more page faults than expected, and it is
+	 * non-deterministic, so sometimes even with large threshold
+	 * this test may fail.
+	 */
+	int threshold = 40;
+	int exp_counter = repeat;
+	if (!disable)
+		exp_counter += repeat * repeat_in_handler;
+	int err_counter = abs(val - exp_counter);
+	int exp_signals = repeat / period;
+	if (!disable)
+		exp_signals += (repeat * repeat_in_handler) / period;
+	int err_signals = abs(count - exp_signals);
+	printf("exp_counter=%d act_counter=%lu err=%d exp_signals=%d act_signals=%d err=%d\n",
+			exp_counter, val, err_counter, exp_signals, count, err_signals);
+	assert(err_counter < threshold);
+	assert(err_signals < threshold);
 	return NULL;
 }
 
@@ -154,7 +170,7 @@ int main(int argc, char **argv)
 	pthread_t pth[th];
 
 	if (argc > 1) {
-		ACCESS_ONCE(disable) = atoi(argv[1]);
+		ACCESS_ONCE(disable) = !!atoi(argv[1]);
 	}
 
 	pthread_barrier_init(&barrier, NULL, th);
