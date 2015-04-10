@@ -25,7 +25,12 @@
 #include <signal.h>
 #include <pthread.h>
 
+#define TRACEPOINT_DEFINE
+#define TRACEPOINT_CREATE_PROBES
+#include "tp.h"
+
 static int __thread fd;
+static void *rb;
 static int __thread rank;
 static int __thread count = 0;
 static int disable = 0;
@@ -60,19 +65,39 @@ do_page_faults(int repeat)
 
 static void signal_handler(int signum, siginfo_t *info, void *arg)
 {
+    int tid = syscall(__NR_gettid);
+    tracepoint(libperf, signal_entry, tid, signum);
 	if (disable)
 		ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
-	count++;
-	do_page_faults(repeat_in_handler);
-	__sync_synchronize();
+	//count++;
+	//do_page_faults(repeat_in_handler);
+	//__sync_synchronize();
 	if (disable)
 		ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+	tracepoint(libperf, signal_exit, tid, signum);
+}
+
+static void setup_mmap(int fd)
+{
+    size_t pg = getpagesize();
+    size_t len = (512 * 1024) / pg;
+    void *addr = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (!addr)
+        return;
+    rb = addr;
+}
+
+void do_hog()
+{
+    volatile x = 1000000;
+    while(x)
+        x--;
 }
 
 pthread_barrier_t barrier;
 pthread_mutex_t lock;
 static int id = 0;
-static int period = 2;
+static int period = 10000;
 void *do_work(void *args)
 {
 	int repeat = *((int *) args);
@@ -84,7 +109,7 @@ void *do_work(void *args)
 	struct perf_event_attr attr = {
 		.type = PERF_TYPE_SOFTWARE,
 		.size = sizeof(attr),
-		.config = PERF_COUNT_SW_PAGE_FAULTS,
+		.config = PERF_COUNT_SW_CPU_CLOCK,
 		.sample_period = period,
 	};
 	pthread_mutex_lock(&lock);
@@ -130,7 +155,10 @@ void *do_work(void *args)
 		break;
 	}
 
-	do_page_faults(repeat);
+	setup_mmap(fd);
+
+	//do_page_faults(repeat);
+	do_hog();
 	pthread_barrier_wait(&barrier);
 	ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
 

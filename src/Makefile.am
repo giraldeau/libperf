@@ -23,7 +23,7 @@ benchmark_SOURCES = libperf_benchmark.c
 benchmark_LDADD = libperf.la
 
 test_signal_SOURCES = libperf_signal.c
-test_signal_LDADD = libperf.la
+test_signal_LDADD = libperf.la -llttng-ust -ldl
 test_signal_CFLAGS = -pthread
 
 test_signal_inherited_SOURCES = libperf_signal_inherited.c
